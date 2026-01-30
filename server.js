@@ -20,11 +20,10 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Environment / Config
 const PORT = process.env.PORT || 10000;
 const MONGO_URL = process.env.MONGO_URL;
 
-// Mongoose models
+// --- МОДЕЛИ ---
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -36,91 +35,95 @@ const messageSchema = new mongoose.Schema({
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   receiver: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   text: { type: String },
-  type: { type: String, default: 'text' }, // e.g. 'text', 'file'
-  file: { type: String }, // base64 or url
+  type: { type: String, default: 'text' },
+  file: { type: String }, 
   time: { type: Date, default: Date.now }
 });
 
 const User = mongoose.model('User', userSchema);
 const Message = mongoose.model('Message', messageSchema);
 
-// Connect to MongoDB
+// --- ПОДКЛЮЧЕНИЕ К БД ---
 if (!MONGO_URL) {
-  console.error('MONGO_URL not set in environment');
+  console.error('Ошибка: MONGO_URL не указан в переменных окружения (.env)');
 } else {
-  mongoose.connect(MONGO_URL, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-  }).then(() => {
-    console.log('Connected to MongoDB');
-  }).catch(err => {
-    console.error('MongoDB connection error:', err);
-  });
+  mongoose.connect(MONGO_URL)
+    .then(() => console.log('Успешное подключение к MongoDB'))
+    .catch(err => console.error('Ошибка подключения к MongoDB:', err));
 }
 
-// Auth routes
-const authRouter = express.Router();
+// --- РОУТЫ ---
 
-// Register
-authRouter.post('/register', async (req, res) => {
+// 1. Получение всех пользователей (нужно для списка контактов)
+app.get('/api/users', async (req, res) => {
+  try {
+    // Возвращаем всех пользователей, кроме их паролей
+    const users = await User.find({}, 'name email avatarImage');
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: 'Ошибка при получении пользователей' });
+  }
+});
+
+// 2. Регистрация
+app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, avatarImage } = req.body;
     if (!name || !email || !password) {
-      return res.status(400).json({ message: 'name, email and password are required' });
+      return res.status(400).json({ message: 'Заполните все обязательные поля' });
     }
     const existing = await User.findOne({ email });
-    if (existing) return res.status(409).json({ message: 'User already exists' });
+    if (existing) return res.status(409).json({ message: 'Пользователь уже существует' });
 
     const hashed = await bcrypt.hash(password, 10);
     const user = new User({ name, email, password: hashed, avatarImage });
     await user.save();
-    // Return minimal user info
-    return res.status(201).json({ user: { id: user._id, name: user.name, email: user.email, avatarImage: user.avatarImage } });
+    
+    // Возвращаем данные в формате, который ожидает фронтенд
+    return res.status(201).json({ _id: user._id, name: user.name, email: user.email, avatarImage: user.avatarImage });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-// Login
-authRouter.post('/login', async (req, res) => {
+// 3. Логин
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: 'email and password required' });
     const user = await User.findOne({ email });
-    if (!user) return res.status(401).json({ message: 'Invalid credentials' });
+    if (!user) return res.status(401).json({ message: 'Неверные данные' });
+    
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ message: 'Invalid credentials' });
-    return res.json({ user: { id: user._id, name: user.name, email: user.email, avatarImage: user.avatarImage } });
+    if (!match) return res.status(401).json({ message: 'Неверные данные' });
+    
+    // ВАЖНО: здесь должно быть _id, а не id
+    return res.json({ 
+      _id: user._id, 
+      name: user.name, 
+      email: user.email, 
+      avatarImage: user.avatarImage 
+    });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-app.use('/api/auth', authRouter);
+app.get('/', (req, res) => res.send({ status: 'ok', service: 'oleg-backend' }));
 
-// Simple health check
-app.get('/', (req, res) => {
-  res.send({ status: 'ok', service: 'oleg-backend' });
-});
-
-// Socket.io logic
+// --- SOCKET.IO LOGIC ---
 io.on('connection', (socket) => {
-  console.log('socket connected', socket.id);
-
-  // Join a room named by userId
   socket.on('join', (userId) => {
     if (!userId) return;
     socket.join(String(userId));
-    console.log(`socket ${socket.id} joined room ${userId}`);
+    console.log(`Пользователь ${userId} подключился`);
   });
 
-  // send_message payload expected: { sender, receiver, text, type, file }
   socket.on('send_message', async (payload) => {
     try {
-      const { sender, receiver, text, type, file } = payload || {};
+      const { sender, receiver, text, type, file } = payload;
       if (!sender || !receiver) return;
+
       const msg = new Message({
         sender,
         receiver,
@@ -130,8 +133,7 @@ io.on('connection', (socket) => {
       });
       await msg.save();
 
-      // Emit to receiver room
-      io.to(String(receiver)).emit('receive_message', {
+      const messageData = {
         id: msg._id,
         sender,
         receiver,
@@ -139,20 +141,17 @@ io.on('connection', (socket) => {
         type: msg.type,
         file: msg.file,
         time: msg.time
-      });
+      };
+
+      // Отправляем получателю
+      io.to(String(receiver)).emit('receive_message', messageData);
+      // Подтверждаем отправку отправителю для отображения в его UI
+      io.to(String(sender)).emit('message_sent', messageData);
 
     } catch (err) {
-      console.error('Error saving/sending message', err);
+      console.error('Ошибка сокетов:', err);
     }
   });
-
-  socket.on('disconnect', () => {
-    console.log('socket disconnected', socket.id);
-  });
 });
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
-
+server.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
