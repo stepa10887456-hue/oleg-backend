@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -176,11 +175,10 @@ io.on('connection', (socket) => {
       };
 
       io.to(String(receiver)).emit('receive_message', messageData);
-      io.to(String(sender)).emit('receive_message', messageData); 
-
+      io.to(String(receiver)).emit('receive_message', messageData);
+      io.to(String(sender)).emit('receive_message', messageData);
     } catch (err) {
-      // Теперь сервер не упадет, а просто выведет ошибку в консоль
-      console.error('Ошибка сохранения сообщения в БД:', err.message);
+      console.error(err);
     }
   });
 });
